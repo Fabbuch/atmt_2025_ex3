@@ -1,16 +1,24 @@
 import itertools
 import math
+import os
 import numpy as np
 import pickle
 import torch
+import random
 
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
-
+import sentencepiece as spm
 
 class Seq2SeqDataset(Dataset):
-    def __init__(self, src_file, tgt_file, src_dict, tgt_dict):
-        self.src_dict, self.src_dict = src_dict, tgt_dict
+    def __init__(self, src_file: str, tgt_file: str, src_model: str, tgt_model: str):
+        # self.src_model, self.tgt_model = src_model, tgt_model
+
+        self.src_model = spm.SentencePieceProcessor()
+        self.src_model.load(src_model)
+        self.tgt_model = spm.SentencePieceProcessor()
+        self.tgt_model.load(tgt_model)
+
         with open(src_file, 'rb') as f:
             self.src_dataset = pickle.load(f)
             self.src_sizes = np.array([len(tokens) for tokens in self.src_dataset])
@@ -28,18 +36,18 @@ class Seq2SeqDataset(Dataset):
 
     def __len__(self):
         return len(self.src_dataset)
-
+    
     def collater(self, samples):
         """Merge a list of samples to form a mini-batch."""
         if len(samples) == 0:
             return {}
         def merge(values, move_eos_to_beginning=False):
             max_length = max(v.size(0) for v in values)
-            result = values[0].new(len(values), max_length).fill_(self.src_dict.pad_idx)
+            result = values[0].new(len(values), max_length).fill_(self.src_model.pad_id())
             for i, v in enumerate(values):
                 if move_eos_to_beginning:
-                    assert v[-1] == self.src_dict.eos_idx
-                    result[i, 0] = self.src_dict.eos_idx
+                    assert v[-1] == self.src_model.eos_id()
+                    result[i, 0] = self.src_model.eos_id()
                     result[i, 1:len(v)] = v[:-1]
                 else:
                     result[i, :len(v)].copy_(v)
@@ -68,45 +76,77 @@ class Seq2SeqDataset(Dataset):
         }
 
 
+
+
 class BatchSampler(Sampler):
-    def __init__(self, dataset, max_tokens=None, batch_size=None, num_shards=1, shard_id=0, shuffle=True, seed=42):
-        self.dataset, self.shuffle, self.seed = dataset, shuffle, seed
-        self.batch_size = batch_size if batch_size is not None else float('Inf')
-        self.max_tokens = max_tokens if max_tokens is not None else float('Inf')
-        self.batches = self._batch_generator()
+    def __init__(self, dataset, max_tokens=None, batch_size=None,
+                 num_shards=1, shard_id=0, shuffle=True, seed=42, buffer_size=10000):
+        """
+        Memory-efficient batch sampler for very large datasets.
 
-        self.shard_len = int(math.ceil(len(self.batches) / num_shards))
-        self.itr = itertools.zip_longest(
-            range(self.shard_len),
-            itertools.islice(self.batches, shard_id, len(self.batches), num_shards),
-            fillvalue=[])
-
-    def __len__(self):
-        return self.shard_len
+        Args:
+            dataset: Dataset with `src_sizes` and `tgt_sizes` arrays.
+            max_tokens (int): Max tokens per batch.
+            batch_size (int): Max samples per batch.
+            num_shards (int): Number of data shards for distributed training.
+            shard_id (int): Current shard ID.
+            shuffle (bool): Shuffle samples.
+            seed (int): Random seed.
+            buffer_size (int): Size of shuffle buffer (controls randomness vs memory).
+        """
+        self.dataset = dataset
+        self.shuffle = shuffle
+        self.seed = seed
+        self.batch_size = batch_size if batch_size is not None else float("inf")
+        self.max_tokens = max_tokens if max_tokens is not None else float("inf")
+        self.num_shards = num_shards
+        self.shard_id = shard_id
+        self.buffer_size = buffer_size
 
     def __iter__(self):
-        return self
+        rng = np.random.default_rng(self.seed)
 
-    def __next__(self):
-        return next(self.itr)[1]
+        # Generate indices (shuffled or sequential)
+        if self.shuffle:
+            indices = rng.permutation(len(self.dataset))
+        else:
+            indices = np.arange(len(self.dataset))
 
-    def _batch_generator(self):
-        np.random.seed(self.seed)
-        indices = np.random.permutation(len(self.dataset)) if self.shuffle else np.arange(len(self.dataset))
-        indices = indices[np.argsort(self.dataset.tgt_sizes[indices], kind='mergesort')]
-        indices = indices[np.argsort(self.dataset.src_sizes[indices], kind='mergesort')]
+        # Sort for length-based batching
+        indices = indices[np.argsort(self.dataset.tgt_sizes[indices], kind="mergesort")]
+        indices = indices[np.argsort(self.dataset.src_sizes[indices], kind="mergesort")]
 
-        batches, batch, sample_len = [], [], 0
-        for idx in indices:
+        # Streaming batch generator
+        batch, sample_len = [], 0
+        buffer = []
+
+        for i, idx in enumerate(indices):
+            if i % self.num_shards != self.shard_id:
+                continue  # skip indices not belonging to this shard
+
             batch.append(idx)
             sample_len = max(sample_len, self.dataset.tgt_sizes[idx])
             num_tokens = len(batch) * sample_len
-            if len(batch) == self.batch_size or num_tokens > self.max_tokens:
-                batches.append(batch)
-                batch, sample_len = [], 0
-        if len(batch) > 0:
-            batches.append(batch)
 
+            if len(batch) == self.batch_size or num_tokens > self.max_tokens:
+                buffer.append(batch)
+                batch, sample_len = [], 0
+
+                # Yield randomly from buffer (shuffle without storing everything)
+                if self.shuffle and len(buffer) >= self.buffer_size:
+                    random.shuffle(buffer)
+                    while buffer:
+                        yield buffer.pop()
+
+        if batch:
+            buffer.append(batch)
+
+        # Flush remaining buffer
         if self.shuffle:
-            np.random.shuffle(batches)
-        return batches
+            random.shuffle(buffer)
+        for b in buffer:
+            yield b
+
+    def __len__(self):
+        # Approximate: dataset_size / batch_size
+        return math.ceil(len(self.dataset) / (self.batch_size or 1))

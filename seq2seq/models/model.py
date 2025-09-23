@@ -26,20 +26,20 @@ class Seq2SeqModel(nn.Module):
 
 
 class Seq2SeqEncoder(nn.Module):
-    def __init__(self, dictionary):
+    def __init__(self, tokenizer):
         super().__init__()
-        self.dictionary = dictionary
+        self.tokenizer = tokenizer
 
-    def forward(self, src_tokens, src_lengths):
+    def forward(self, input, mask):
         raise NotImplementedError
 
 
 class Seq2SeqDecoder(nn.Module):
-    def __init__(self, dictionary):
+    def __init__(self, tokenizer):
         super().__init__()
-        self.dictionary = dictionary
+        self.tokenizer = tokenizer
 
-    def forward(self, src_inputs, tgt_inputs, encoder_out):
+    def forward(self, encoder_out, src_mask, trg, trg_pad_mask):
         raise NotImplementedError
 
     def reorder_incremental_state(self, incremental_state, new_order):

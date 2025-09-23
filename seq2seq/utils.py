@@ -1,30 +1,34 @@
 import os
 import logging
-import pickle
 import torch
-import torch.nn as nn
 import sys
-import preprocess
+import sentencepiece as spm
 
 from collections import defaultdict
 from torch.serialization import default_restore_location
 
+def save_embedding_layer(embedding_layer, file_path):
+    """
+    Save the weights of an embedding layer to a file using torch.save.
 
-def load_embedding(embed_path, dictionary):
-    """Parse an embedding text file into an torch.nn.Embedding layer."""
-    embed_dict, embed_dim = {}, None
-    with open(embed_path) as file:
-        embed_dim = int(next(file).rstrip().split(" ")[1])
-        for line in file:
-            tokens = line.rstrip().split(" ")
-            embed_dict[tokens[0]] = torch.Tensor([float(weight) for weight in tokens[1:]])
+    Args:
+        embedding_layer (nn.Embedding): The embedding layer to save.
+        file_path (str): Path to the file where the embedding weights will be saved.
+    """
+    torch.save(embedding_layer.state_dict(), file_path)
 
-    logging.info('Loaded {} / {} word embeddings'.format(
-        len(set(embed_dict.keys()) & set(dictionary.words)), len(embed_dict)))
-    embedding = nn.Embedding(len(dictionary), embed_dim, dictionary.pad_idx)
-    for idx, word in enumerate(dictionary.words):
-        if word in embed_dict:
-            embedding.weight.data[idx] = embed_dict[word]
+def load_embedding(embed_path, tokenizer):
+    """Load pretrained embeddings."""
+
+    embedding = {}
+    with open(embed_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            values = line.rstrip().split(' ')
+            token = values[0]
+            vector = list(map(float, values[1:]))
+            # Convert token to id using sentencepiece tokenizer
+            token_id = tokenizer.piece_to_id(token)
+            embedding[token_id] = torch.tensor(vector)
     return embedding
 
 
@@ -67,7 +71,7 @@ def save_checkpoint(args, model, optimizer, epoch, valid_loss):
 def load_checkpoint(args, model, optimizer):
     checkpoint_path = os.path.join(args.save_dir, args.restore_file)
     if os.path.isfile(checkpoint_path):
-        state_dict = torch.load(checkpoint_path, map_location=lambda s, l: default_restore_location(s, 'cpu'))
+        state_dict = torch.load(checkpoint_path, map_location=lambda s, l: default_restore_location(s, 'cpu'), weights_only=False)
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
         save_checkpoint.best_loss = state_dict['best_loss']
@@ -114,23 +118,25 @@ def set_incremental_state(module, incremental_state, key, value):
         incremental_state[full_key] = value
 
 
-def post_process_prediction(hypo_tokens, src_str, alignment, tgt_dict, remove_bpe):
-    hypo_str = tgt_dict.string(hypo_tokens, remove_bpe)
-    # hypo_str = replace_unk(hypo_str, src_str, alignment, tgt_dict.unk_word)
-    # Convert back to tokens for evaluating with unk replacement or without BPE
-    # Note that the dictionary can be modified inside the method.
-    hypo_tokens = tgt_dict.binarize(hypo_str, preprocess.word_tokenize, add_if_not_exist=True)
-    return hypo_tokens, hypo_str, alignment
-
-
-def replace_unk(hypo_str, src_str, alignment, unk):
-    hypo_tokens = preprocess.word_tokenize(hypo_str)
-    src_tokens = preprocess.word_tokenize(src_str) + ['<eos>']
-    for i, ht in enumerate(hypo_tokens):
-        if ht == unk:
-            hypo_tokens[i] = src_tokens[alignment[i]]
-    return ' '.join(hypo_tokens)
-
-
 def strip_pad(tensor, pad):
     return tensor[tensor.ne(pad)]
+
+
+def load_tokenizer(tokenizer_path):
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(tokenizer_path)
+    return tokenizer
+
+
+def make_batch_input(device, pad: int = 3, max_seq_len: int = None):
+    def batch_fn(x, y):
+        if max_seq_len is not None:
+            x = x[:, :max_seq_len]
+            y = y[:, :max_seq_len]
+        src = x.to(device)
+        tgt_in = y[:, :-1].to(device)
+        tgt_out = y[:, 1:].contiguous().view(-1).to(device)
+        src_pad_mask = (src == pad).view(src.size(0), 1, 1, src.size(-1))
+        tgt_pad_mask = (tgt_in == pad).view(tgt_in.size(0), 1, 1, tgt_in.size(-1))
+        return src, tgt_in, tgt_out, src_pad_mask, tgt_pad_mask
+    return batch_fn

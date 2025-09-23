@@ -1,2 +1,25 @@
-assignments/01/baseline/
+
+# Venv
+.venv-atmt2025/
+# Python
 __pycache__/
+
+# not relevant
+old_files_and_debugging/
+changes.md
+repo_outline.md
+trim.py
+
+# toy example outputs
+
+toy_example/data/prepared/*
+toy_example/tokenizers
+toy_example/logs
+toy_example/checkpoints
+toy_example/toy_example_output.en
+# other outputs
+/example
+/cz-en
+
+# unused
+seq2seq/embedding_saver.py

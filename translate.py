@@ -1,16 +1,29 @@
 import os
 import logging
 import argparse
+import time
 import numpy as np
+import sacrebleu
 from tqdm import tqdm
 
 import torch
+import sentencepiece as spm
 from torch.serialization import default_restore_location
 
+import sys
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+from seq2seq.decode import decode
+from seq2seq.data.tokenizer import BPETokenizer
 from seq2seq import models, utils
-from seq2seq.data.dictionary import Dictionary
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
 
+def decode_to_string(tokenizer, array):
+    """
+    Takes a tensor of token IDs and decodes it back into a string."""
+    if torch.is_tensor(array) and array.dim() == 2:
+        return '\n'.join(decode_to_string(tokenizer, t) for t in array)
+    return tokenizer.Decode(array.tolist())
 
 def get_args():
     """ Defines generation-specific hyper-parameters. """
@@ -19,13 +32,18 @@ def get_args():
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
     # Add data arguments
-    parser.add_argument('--data', required=True, help='path to data directory')
-    parser.add_argument('--dicts', required=True, help='path to directory containing source and target dictionaries')
+    parser.add_argument('--input', required=True, help='Path to the raw text file to translate (one sentence per line)')
+    parser.add_argument('--src-tokenizer', help='path to source sentencepiece tokenizer', required=True)
+    parser.add_argument('--tgt-tokenizer', help='path to target sentencepiece tokenizer', required=True)
     parser.add_argument('--checkpoint-path', required=True, help='path to the model file')
     parser.add_argument('--batch-size', default=1, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', required=True, type=str, help='path to the output file destination')
     parser.add_argument('--max-len', default=128, type=int, help='maximum length of generated sequence')
-
+    
+    # BLEU computation arguments
+    parser.add_argument('--bleu', action='store_true', help='If set, compute BLEU score after translation')
+    parser.add_argument('--reference', type=str, help='Path to the reference file (one sentence per line, required if --bleu is set)')
+    
     return parser.parse_args()
 
 
@@ -33,89 +51,153 @@ def main(args):
     """ Main translation function' """
     # Load arguments from checkpoint
     torch.manual_seed(args.seed)
-    state_dict = torch.load(args.checkpoint_path, map_location=lambda s, l: default_restore_location(s, 'cpu'))
+    state_dict = torch.load(args.checkpoint_path, map_location=lambda s, l: default_restore_location(s, 'cpu'), weights_only=False)
     args_loaded = argparse.Namespace(**{**vars(state_dict['args']), **vars(args)})
     args = args_loaded
     utils.init_logging(args)
 
-    # Load dictionaries
-    src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
-    logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
-    tgt_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.target_lang)))
-    logging.info('Loaded a target dictionary ({:s}) with {:d} words'.format(args.target_lang, len(tgt_dict)))
 
-    # Load dataset
-    test_dataset = Seq2SeqDataset(
-        src_file=os.path.join(args.data, 'test.{:s}'.format(args.source_lang)),
-        tgt_file=os.path.join(args.data, 'test.{:s}'.format(args.target_lang)),
-        src_dict=src_dict, tgt_dict=tgt_dict)
-    test_loader = torch.utils.data.DataLoader(test_dataset, num_workers=1, collate_fn=test_dataset.collater,
-                                              batch_sampler=BatchSampler(test_dataset, 9999999,
-                                                                         args.batch_size, 1, 0, shuffle=False,
-                                                                         seed=args.seed))
+    src_tokenizer = utils.load_tokenizer(args.src_tokenizer)
+    tgt_tokenizer = utils.load_tokenizer(args.tgt_tokenizer)
+    # make_batch = utils.make_batch_input(device='cuda' if args.cuda else 'cpu',
+    #                                     pad=src_tokenizer.pad_id(),
+    #                                     max_seq_len=args.max_len)
+
+    # Read input sentences
+    with open(args.input, encoding="utf-8") as f:
+        src_lines = [line.strip() for line in f if line.strip()]
+
+    # Encode input sentences
+    src_encoded = [torch.tensor(src_tokenizer.Encode(line, out_type=int)) for line in src_lines]
+    # trim to max_len
+    src_encoded = [s if len(s)<=args.max_len else s[:args.max_len] for s in src_encoded]
+
+
+    # batch input sentences
+    def batch_iter(lst, batch_size):
+        for i in range(0, len(lst), batch_size):
+            yield lst[i:i+batch_size]
+    
     # Build model and criterion
-    model = models.build_model(args, src_dict, tgt_dict)
+    model = models.build_model(args, src_tokenizer, tgt_tokenizer)
     if args.cuda:
         model = model.cuda()
     model.eval()
     model.load_state_dict(state_dict['model'])
     logging.info('Loaded a model from checkpoint {:s}'.format(args.checkpoint_path))
-    progress_bar = tqdm(test_loader, desc='| Generation', leave=False)
 
-    # Iterate over the test set
-    all_hyps = {}
-    for i, sample in enumerate(progress_bar):
-        with torch.no_grad():
-            # Compute the encoder output
-            encoder_out = model.encoder(sample['src_tokens'], sample['src_lengths'])
-            go_slice = \
-                torch.ones(sample['src_tokens'].shape[0], 1).fill_(tgt_dict.eos_idx).type_as(sample['src_tokens'])
-            if args.cuda:
-                go_slice = utils.move_to_cuda(go_slice)
-            prev_words = go_slice
-            next_words = None
+    DEVICE = 'cuda' if args.cuda else 'cpu'
+    PAD = src_tokenizer.pad_id()
+    BOS = tgt_tokenizer.bos_id()
+    EOS = tgt_tokenizer.eos_id()
+    print(f'PAD ID: {PAD}, BOS ID: {BOS}, EOS ID: {EOS}\n\
+          PAD token: "{src_tokenizer.IdToPiece(PAD)}", BOS token: "{tgt_tokenizer.IdToPiece(BOS)}", EOS token: "{tgt_tokenizer.IdToPiece(EOS)}"')
 
-        for _ in range(args.max_len):
-            with torch.no_grad():
-                # Compute the decoder output by repeatedly feeding it the decoded sentence prefix
-                decoder_out, _ = model.decoder(prev_words, encoder_out)
-            # Suppress <UNK>s
-            _, next_candidates = torch.topk(decoder_out, 2, dim=-1)
-            best_candidates = next_candidates[:, :, 0]
-            backoff_candidates = next_candidates[:, :, 1]
-            next_words = torch.where(best_candidates == tgt_dict.unk_idx, backoff_candidates, best_candidates)
-            prev_words = torch.cat([go_slice, next_words], dim=1)
-
-        # Segment into sentences
-        decoded_batch = next_words.cpu().numpy()
-        output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
-        assert(len(output_sentences) == len(sample['id'].data))
-
-        # Remove padding
-        temp = list()
-        for sent in output_sentences:
-            first_eos = np.where(sent == tgt_dict.eos_idx)[0]
-            if len(first_eos) > 0:
-                temp.append(sent[:first_eos[0]])
-            else:
-                temp.append([])
-        output_sentences = temp
-
-        # Convert arrays of indices into strings of words
-        output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
-
-        # Save translations
-        assert(len(output_sentences) == len(sample['id'].data))
-        for ii, sent in enumerate(output_sentences):
-            all_hyps[int(sample['id'].data[ii])] = sent
-
-    # Write to file
+    # Clear output file
     if args.output is not None:
         with open(args.output, 'w', encoding="utf-8") as out_file:
-            for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+            out_file.write('')
+
+    def remove_pad(sent):
+        '''truncate the sentence if BOS is in it,
+        otherwise simply remove the padding tokens at the end'''
+        if type(sent) == torch.Tensor:
+            sent = sent.tolist()
+        if sent.count(EOS)>0:
+            sent = sent[0:sent.index(EOS)+1]
+        while sent and sent[-1] == PAD:
+            sent = sent[:-1]
+        return sent
+
+    def decode_sentence(tokenizer: spm.SentencePieceProcessor, sentence_ids):
+        'convert a tokenized sentence (a list of numbers) to a literal string'
+        if not isinstance(sentence_ids, list):
+            sentence_ids = sentence_ids.tolist()
+        sentence_ids = remove_pad(sentence_ids)
+        return "".join(tokenizer.Decode(sentence_ids, out_type=str))
+    
+
+    translations = []
+    start_time = time.perf_counter()
+
+    make_batch = utils.make_batch_input(device=DEVICE, pad=src_tokenizer.pad_id(), max_seq_len=args.max_len)
+
+
+    #------------------------------------------
+    # Translation loop (batched)
+    for batch in tqdm(batch_iter(src_encoded, args.batch_size)):
+        with torch.no_grad():
+            # 1. Pad the batch to the same length
+            batch_lengths = [len(x) for x in batch]
+            max_len = max(batch_lengths)
+            batch_padded = [
+                torch.cat([x, torch.full((max_len - len(x),), PAD, dtype=torch.long)]) if len(x) < max_len else x
+                for x in batch
+            ]
+            src_tokens = torch.stack(batch_padded).to(DEVICE)
+
+            # 2. Create a dummy target tensor (all PADs, same shape as src_tokens)
+            dummy_y = torch.full_like(src_tokens, fill_value=src_tokenizer.pad_id())
+
+            # 3. Use make_batch to get masks (trg_in, trg_out are not used for inference)
+            src_tokens, trg_in, trg_out, src_pad_mask, trg_pad_mask = make_batch(src_tokens, dummy_y)
+
+            #-----------------------------------------
+            # Decode without teacher forcing
+            prediction = decode(model=model,
+                                      src_tokens=src_tokens,
+                                      src_pad_mask=src_pad_mask,
+                                      max_out_len=args.max_len,
+                                      tgt_tokenizer=tgt_tokenizer,
+                                      args=args,
+                                      device=DEVICE)
+            #----------------------------------------
+
+        
+        # batch_lens = [len(x) for x in batch]
+        # max_len = max(batch_lens)
+        # batch_padded = [torch.cat([x, torch.full((max_len - len(x),), PAD, dtype=torch.long)]) if len(x) < max_len else x for x in batch]
+        # src_tokens = torch.stack(batch_padded).to(DEVICE)
+        # dB = src_tokens.size(0)
+        # y = torch.full((dB, 1), BOS, dtype=torch.long, device=DEVICE)
+        # x_pad_mask = (src_tokens == PAD).view(src_tokens.size(0), 1, 1, src_tokens.size(-1)).to(DEVICE)
+        # encoder_out = model.encoder(src_tokens, x_pad_mask)
+
+
+        # for _ in range(args.max_len):
+        #     y_pad_mask = (y == PAD).view(y.size(0), 1, 1, y.size(-1)).to(DEVICE)
+        #     logits = model.decoder(encoder_out, x_pad_mask, y, y_pad_mask)
+        #     last_output = logits.argmax(-1)[:, -1]
+        #     last_output = last_output.view(dB, 1)
+        #     y = torch.cat((y, last_output), 1).to(DEVICE)
+        # Remove BOS and decode each sentence
+        for sent in prediction:
+            translation = decode_sentence(tgt_tokenizer, sent)
+            translations.append(translation)
+            if args.output is not None:
+                with open(args.output, 'a', encoding="utf-8") as out_file:
+                    out_file.write(translation + '\n')
+    #------------------------------------------
+    
+    logging.info(f'Wrote {len(translations)} lines to {args.output}')
+    end_time = time.perf_counter()
+    logging.info(f'Translation completed in {end_time - start_time:.2f} seconds')
+
+    # Compute BLEU score if requested
+    if getattr(args, 'bleu', False):
+        with open(args.reference, encoding='utf-8') as ref_file:
+            references = [line.strip() for line in ref_file if line.strip()]
+        if len(references) != len(translations):
+            raise ValueError(f"Reference ({len(references)}) and hypothesis ({len(translations)}) line counts do not match.")
+        bleu = sacrebleu.corpus_bleu(translations, [references])
+        print(f"BLEU score: {bleu.score:.2f}")
 
 
 if __name__ == '__main__':
     args = get_args()
+    # make sure --reference is provided if --bleu is set
+    if getattr(args, 'bleu', False):
+        if not args.reference:
+            raise ValueError("You must provide --reference when using --bleu.")
+        
     main(args)

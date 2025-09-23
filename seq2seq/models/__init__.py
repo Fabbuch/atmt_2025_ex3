@@ -9,8 +9,8 @@ ARCH_MODEL_REGISTRY = {}
 ARCH_CONFIG_REGISTRY = {}
 
 
-def build_model(args, src_dict, tgt_dict):
-    return ARCH_MODEL_REGISTRY[args.arch].build_model(args, src_dict, tgt_dict)
+def build_model(args, src_tokenizer, tgt_tokenizer) -> Seq2SeqModel:
+    return ARCH_MODEL_REGISTRY[args.arch].build_model(args, src_tokenizer, tgt_tokenizer)
 
 
 def register_model(name):
