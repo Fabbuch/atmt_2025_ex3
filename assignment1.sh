@@ -16,7 +16,7 @@ export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX/pkgs/cuda-toolkit
 python preprocess.py \
     --source-lang cz \
     --target-lang en \
-    --raw-data ./cz-en/data/raw \
+    --raw-data ~/shares/cz-en/data/raw \
     --dest-dir ./cz-en/data/prepared \
     --model-dir ./cz-en/tokenizers \
     --test-prefix test \

@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import logging
 import argparse
@@ -13,13 +14,13 @@ import torch.nn as nn
 
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
-# from utils import init_logging
 from seq2seq import models, utils
 from seq2seq.decode import decode
 from seq2seq.models import ARCH_MODEL_REGISTRY, ARCH_CONFIG_REGISTRY
 
-
+SEED = random.randint(1, 1_000_000_000)
 
 
 def get_args():
@@ -69,7 +70,7 @@ def main(args):
     """ Main training function. Trains the translation model over the course of several epochs, including dynamic
     learning rate adjustment and gradient clipping. """
     logging.info('Commencing training!')
-    torch.manual_seed(42)
+    torch.manual_seed(SEED)
 
     utils.init_logging(args)
 
@@ -117,7 +118,7 @@ def main(args):
         train_loader = \
             torch.utils.data.DataLoader(train_dataset, num_workers=1, collate_fn=train_dataset.collater,
                                         batch_sampler=BatchSampler(train_dataset, args.max_tokens, args.batch_size, 1,
-                                                                   0, shuffle=True, seed=42))
+                                                                   0, shuffle=True, seed=SEED))
         model.train()
         stats = OrderedDict()
         stats['loss'] = 0
@@ -222,7 +223,7 @@ def validate(args, model, criterion, valid_dataset, epoch,
     valid_loader = \
         torch.utils.data.DataLoader(valid_dataset, num_workers=1, collate_fn=valid_dataset.collater,
                                     batch_sampler=BatchSampler(valid_dataset, args.max_tokens, args.batch_size, 1, 0,
-                                                               shuffle=False, seed=42))
+                                                               shuffle=False, seed=SEED))
     model.eval()
     stats = OrderedDict()
     stats['valid_loss'] = 0
@@ -283,7 +284,6 @@ def validate(args, model, criterion, valid_dataset, epoch,
     if src_tokenizer is not None and tgt_tokenizer is not None and len(all_hypotheses) > 0:
         bleu = sacrebleu.corpus_bleu(all_hypotheses, [all_references])
         bleu_score = bleu.score
-        # stats['bleu'] = bleu_score
 
     # Logging
     logging.info(
@@ -309,9 +309,9 @@ def evaluate(args, model, test_dataset,
         test_dataset,
         num_workers=1,
         collate_fn=test_dataset.collater,
-        # batch_size != 1 messes things up with decoding
+        # batch_size != 1 may mess things up with decoding
         batch_sampler=BatchSampler(test_dataset, args.max_tokens, batch_size=1, 
-                                   num_shards=1, shard_id=0, shuffle=False, seed=42),
+                                   num_shards=1, shard_id=0, shuffle=False, seed=SEED),
     )
 
     model.eval()
@@ -368,6 +368,7 @@ def evaluate(args, model, test_dataset,
 
 if __name__ == '__main__':
     args = get_args()
+    args.seed = SEED
     os.makedirs(os.path.dirname(args.log_file), exist_ok=True)
 
     # Set up logging to file
@@ -379,34 +380,3 @@ if __name__ == '__main__':
         console.setLevel(logging.INFO)
         logging.getLogger('').addHandler(console)
     main(args)
-
-    # ----------------------------
-    # EXAMPLE CALL:
-    #
-    # - directory structure:
-    # example/
-    # ├── data/
-    # │   ├── raw/
-    # │   │   └── ...
-    # │   └── prepared/
-    # │       ├── train.en
-    # │       ├── train.sv
-    # │       ├── valid.en
-    # │       ├── valid.sv
-    # │       ├── test.en
-    # │       └── test.sv
-    #   python train.py --cuda \
-    #       --data example/data/prepared/ \
-    #       --src-tokenizer models/en-bpe-1200.model \
-    #       --tgt-tokenizer models/sv-bpe-1200.model \
-    #       --source-lang en \
-    #       --target-lang sv \
-    #       --batch-size 32 \
-    #       --max-tokens 1024 \
-    #       --train-on-tiny \
-    #       --arch transformer \
-    #       --max-epoch 100 \
-    #       --log-file example/logs/train.log \
-    #       --save-dir example/checkpoints/ \
-    #   python train.py --cuda --data example/data/prepared/ --source-lang en --target-lang sv --batch-size 32 --max-tokens 1024 --train-on-tiny --arch transformer --max-epoch 100 --log-file example/logs/train.log --save-dir example/checkpoints/
-    #   python train.py --data example\data\prepared\ --source-lang en --target-lang sv --batch-size 32 --max-tokens 1024 --train-on-tiny --arch transformer --max-epoch 100 --log-file example\logs\train.log --save-dir example\checkpoints\ --src-tokenizer example\tokenizers\en-bpe-1200.model --tgt-tokenizer example\tokenizers\sv-bpe-1200.model

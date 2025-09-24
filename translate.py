@@ -127,7 +127,7 @@ def main(args):
     # Translation loop (batched)
     for batch in tqdm(batch_iter(src_encoded, args.batch_size)):
         with torch.no_grad():
-            # 1. Pad the batch to the same length
+            # Pad the batch to the same length
             batch_lengths = [len(x) for x in batch]
             max_len = max(batch_lengths)
             batch_padded = [
@@ -136,10 +136,10 @@ def main(args):
             ]
             src_tokens = torch.stack(batch_padded).to(DEVICE)
 
-            # 2. Create a dummy target tensor (all PADs, same shape as src_tokens)
+            # Create a dummy target tensor (all PADs, same shape as src_tokens)
             dummy_y = torch.full_like(src_tokens, fill_value=src_tokenizer.pad_id())
 
-            # 3. Use make_batch to get masks (trg_in, trg_out are not used for inference)
+            # Use make_batch to get masks (trg_in, trg_out are not used for inference)
             src_tokens, trg_in, trg_out, src_pad_mask, trg_pad_mask = make_batch(src_tokens, dummy_y)
 
             #-----------------------------------------
@@ -153,23 +153,6 @@ def main(args):
                                       device=DEVICE)
             #----------------------------------------
 
-        
-        # batch_lens = [len(x) for x in batch]
-        # max_len = max(batch_lens)
-        # batch_padded = [torch.cat([x, torch.full((max_len - len(x),), PAD, dtype=torch.long)]) if len(x) < max_len else x for x in batch]
-        # src_tokens = torch.stack(batch_padded).to(DEVICE)
-        # dB = src_tokens.size(0)
-        # y = torch.full((dB, 1), BOS, dtype=torch.long, device=DEVICE)
-        # x_pad_mask = (src_tokens == PAD).view(src_tokens.size(0), 1, 1, src_tokens.size(-1)).to(DEVICE)
-        # encoder_out = model.encoder(src_tokens, x_pad_mask)
-
-
-        # for _ in range(args.max_len):
-        #     y_pad_mask = (y == PAD).view(y.size(0), 1, 1, y.size(-1)).to(DEVICE)
-        #     logits = model.decoder(encoder_out, x_pad_mask, y, y_pad_mask)
-        #     last_output = logits.argmax(-1)[:, -1]
-        #     last_output = last_output.view(dB, 1)
-        #     y = torch.cat((y, last_output), 1).to(DEVICE)
         # Remove BOS and decode each sentence
         for sent in prediction:
             translation = decode_sentence(tgt_tokenizer, sent)

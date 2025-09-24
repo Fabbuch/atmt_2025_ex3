@@ -173,35 +173,3 @@ if __name__ == "__main__":
     make_split_datasets(args.target_lang, tgt_processor)
 
     logging.info('Data processing complete!')
-
-    # ----------------------------
-    # EXAMPLE CALL:
-    #
-    #   python data_process.py --source-lang en --target-lang de --raw-data example/data/raw --dest-dir example/data/prepared --model-dir example/models --train-prefix train --valid-prefix valid --test-prefix test --src-vocab-size 1200 --tgt-vocab-size 1200
-    #
-    #
-    # For a directory structure like this:
-    #
-    # example/
-    # ├── data/
-    # │   ├── raw/
-    # │   │   ├── train.en
-    # │   │   ├── train.de
-    # │   │   ├── valid.en
-    # │   │   ├── valid.de
-    # │   │   ├── test.en
-    # │   │   └── test.de
-    # │   └── prepared/
-    # │       ├── train.en
-    # │       ├── train.de
-    # │       ├── valid.en
-    # │       ├── valid.de
-    # │       ├── test.en
-    # │       └── test.de
-    # └── models/
-    #     ├── en-bpe-1200.model
-    #     ├── de-bpe-1200.model
-    #     ├── en-bpe-1200.vocab
-    #     └── de-bpe-1200.vocab
-    # ----------------------------
-    
