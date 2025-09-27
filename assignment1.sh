@@ -23,7 +23,6 @@ python preprocess.py \
     --test-prefix test \
     --train-prefix train \
     --valid-prefix valid \
-    --tiny-train-prefix tiny_train \
     --src-vocab-size 8000 \
     --tgt-vocab-size 8000 \
     --src-model ./cz-en/tokenizers/cz-bpe-8000.model \
