@@ -60,5 +60,4 @@ python translate.py \
     --tgt-tokenizer cz-en/tokenizers/en-bpe-8000.model \
     --checkpoint-path cz-en/checkpoints/checkpoint_best.pt \
     --output cz-en/output.txt \
-    --file-prefix test \
     --max-len 300
