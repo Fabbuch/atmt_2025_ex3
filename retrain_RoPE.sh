@@ -15,7 +15,6 @@ export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX/pkgs/cuda-toolkit
 
 # PREPARE DATA
 python preprocess.py \
-    --cuda \
     --source-lang cz \
     --target-lang en \
     --raw-data ~/shares/cz-en/data/raw \
