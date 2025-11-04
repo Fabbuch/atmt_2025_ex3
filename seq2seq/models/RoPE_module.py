@@ -30,5 +30,8 @@ class RotaryPositionalEncoding(nn.Module):
         rotate_half_x = torch.stack([-x[..., 1::2], x[..., ::2]], dim=-1).reshape_as(
             x
         )
+        self.cos_pos = self.cos_pos.to(x.device)
+        self.sin_pos = self.sin_pos.to(x.device)
+        rotate_half_x = rotate_half_x.to(x.device)
         x = x * self.cos_pos[:, :x.size(1), :] + rotate_half_x[:, :x.size(1), :] * self.sin_pos[:, :x.size(1), :]
         return x
