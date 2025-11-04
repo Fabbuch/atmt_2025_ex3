@@ -36,6 +36,7 @@ def get_args():
     parser.add_argument('--tgt-tokenizer', help='path to target sentencepiece tokenizer', required=True)
     parser.add_argument('--max-tokens', default=None, type=int, help='maximum number of tokens in a batch')
     parser.add_argument('--batch-size', default=1, type=int, help='maximum number of sentences in a batch')
+    parser.add_argument('--num-workers', default=0, type=int, help='DataLoader workers (set 0 to avoid shm issues)')
     parser.add_argument('--train-on-tiny', action='store_true', help='train model on a tiny dataset')
     
     # # Add model arguments
@@ -116,7 +117,7 @@ def main(args):
     
     for epoch in range(last_epoch + 1, args.max_epoch):
         train_loader = \
-            torch.utils.data.DataLoader(train_dataset, num_workers=1, collate_fn=train_dataset.collater,
+            torch.utils.data.DataLoader(train_dataset, num_workers=args.num_workers, collate_fn=train_dataset.collater,
                                         batch_sampler=BatchSampler(train_dataset, args.max_tokens, args.batch_size, 1,
                                                                    0, shuffle=True, seed=SEED))
         model.train()
@@ -221,7 +222,7 @@ def validate(args, model, criterion, valid_dataset, epoch,
              tgt_tokenizer: spm.SentencePieceProcessor):
     """ Validates model performance on a held-out development set. """
     valid_loader = \
-        torch.utils.data.DataLoader(valid_dataset, num_workers=1, collate_fn=valid_dataset.collater,
+        torch.utils.data.DataLoader(valid_dataset, num_workers=args.num_workers, collate_fn=valid_dataset.collater,
                                     batch_sampler=BatchSampler(valid_dataset, args.max_tokens, args.batch_size, 1, 0,
                                                                shuffle=False, seed=SEED))
     model.eval()
@@ -307,7 +308,7 @@ def evaluate(args, model, test_dataset,
     """
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
-        num_workers=1,
+        num_workers=args.num_workers,
         collate_fn=test_dataset.collater,
         # batch_size != 1 may mess things up with decoding
         batch_sampler=BatchSampler(test_dataset, args.max_tokens, batch_size=1, 

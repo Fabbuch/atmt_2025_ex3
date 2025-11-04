@@ -26,6 +26,8 @@ def get_args():
     parser.add_argument("--ignore-existing", action="store_true", help="Skip processing of raw-files if the output file already exists. Useful for resuming.")
     parser.add_argument("--src-vocab-size", type=int, default=32000, help="Vocabulary size for Source Language SentencePiece.")
     parser.add_argument("--tgt-vocab-size", type=int, default=32000, help="Vocabulary size for Target Language SentencePiece.")
+    parser.add_argument("--sp-model-type", type=str, choices=["bpe", "unigram"], default="bpe", help="SentencePiece model type.")
+    parser.add_argument("--joint-tokenizer", action="store_true", help="Train a single joint tokenizer on src+tgt and share it.")
     
     parser.add_argument("--quiet", action="store_true", help="Suppress logging output.")
 
@@ -76,11 +78,20 @@ if __name__ == "__main__":
     args = get_args()
 
     # define paths for tokenization models
-    # if no model path is given, create a model path in the model directory with the format LANG-bpe-VOCABSIZE.model
-    tgt_tokenizer_model = args.tgt_model if args.tgt_model \
-        else os.path.join(args.model_dir, f"{args.target_lang}-bpe-{args.tgt_vocab_size}.model")
-    src_tokenizer_model = args.src_model if args.src_model \
-        else os.path.join(args.model_dir, f"{args.source_lang}-bpe-{args.src_vocab_size}.model")
+    # if no model path is given, create a model path in the model directory
+    if args.joint_tokenizer:
+        # require same vocab size (use src size if different)
+        if args.src_vocab_size != args.tgt_vocab_size:
+            logging.warning("src-vocab-size != tgt-vocab-size; using src-vocab-size for joint tokenizer")
+        joint_vocab = args.src_vocab_size
+        joint_model = os.path.join(args.model_dir, f"joint-{args.sp_model_type}-{joint_vocab}.model")
+        tgt_tokenizer_model = joint_model
+        src_tokenizer_model = joint_model
+    else:
+        tgt_tokenizer_model = args.tgt_model if args.tgt_model \
+            else os.path.join(args.model_dir, f"{args.target_lang}-{args.sp_model_type}-{args.tgt_vocab_size}.model")
+        src_tokenizer_model = args.src_model if args.src_model \
+            else os.path.join(args.model_dir, f"{args.source_lang}-{args.sp_model_type}-{args.src_vocab_size}.model")
     
     os.makedirs(args.dest_dir, exist_ok=True)
 
@@ -92,18 +103,34 @@ if __name__ == "__main__":
         eos=args.eos_token,
         bos=args.bos_token,
         pad=args.pad_token,
-        unk=args.unk_token
+        unk=args.unk_token,
+        model_type=args.sp_model_type
     )
     # train or load model
     # if no model path is given or the given model file does not exist, train a new model
     if (not os.path.exists(src_tokenizer_model)) or (args.force_train):
-        # error handling if no training data is provided
         if args.train_prefix is None:
-            raise ValueError("No training data provided for training the source language tokenizer model.")
-        # train model
-        src_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}"), model_dir=args.model_dir)
+            raise ValueError("No training data provided for training the tokenizer model.")
+        if args.joint_tokenizer:
+            # Train a joint tokenizer on concatenated corpora
+            training_files = [
+                os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}"),
+                os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}")
+            ]
+            joint_proc = BPETokenizer(language="joint", vocab_size=args.src_vocab_size,
+                                      eos=args.eos_token, bos=args.bos_token, pad=args.pad_token, unk=args.unk_token,
+                                      model_type=args.sp_model_type)
+            joint_proc.train_tokenizer(training_data=training_files, model_dir=args.model_dir)
+            # load trained joint model into src_processor
+            src_processor.load(model_path=src_tokenizer_model)
+        else:
+            # train source model only
+            src_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.source_lang}"), model_dir=args.model_dir)
         if not args.quiet:
-            logging.info('Trained SentencePiece model for {} with {} words'.format(args.source_lang, src_processor.vocab_size))
+            logging.info('Trained SentencePiece model for {} with {} words'.format(
+                'joint' if args.joint_tokenizer else args.source_lang,
+                src_processor.vocab_size if not args.joint_tokenizer else args.src_vocab_size
+            ))
     else:
         # load model
         src_processor.load(model_path=src_tokenizer_model)
@@ -121,15 +148,23 @@ if __name__ == "__main__":
         eos=args.eos_token,
         bos=args.bos_token,
         pad=args.pad_token,
-        unk=args.unk_token
+        unk=args.unk_token,
+        model_type=args.sp_model_type
     )
     # train or load model
     if (not os.path.exists(tgt_tokenizer_model)) or (args.force_train):
         if args.train_prefix is None:
-            raise ValueError("No training data provided for training the target language tokenizer model.")
-        tgt_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}"), model_dir=args.model_dir)
+            raise ValueError("No training data provided for training the tokenizer model.")
+        if args.joint_tokenizer:
+            # joint already trained above; just load into tgt
+            tgt_processor.load(model_path=tgt_tokenizer_model)
+        else:
+            tgt_processor.train_tokenizer(training_data=os.path.join(args.raw_data, f"{args.train_prefix}.{args.target_lang}"), model_dir=args.model_dir)
         if not args.quiet:
-            logging.info('Trained SentencePiece model for {} with {} words'.format(args.target_lang, tgt_processor.vocab_size))
+            logging.info('Trained SentencePiece model for {} with {} words'.format(
+                'joint' if args.joint_tokenizer else args.target_lang,
+                tgt_processor.vocab_size
+            ))
     else:
         tgt_processor.load(model_path=tgt_tokenizer_model)
         if not args.quiet:
