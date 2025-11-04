@@ -86,7 +86,7 @@ def main(args):
     # Encode input sentences
     src_encoded = [torch.tensor(src_tokenizer.Encode(line, out_type=int, add_eos=True)) for line in src_lines]
     # trim to max_len
-    max_seq_len = min(args.max_len)
+    max_seq_len = args.max_len
     # src_encoded = [s[:max_seq_len] for s in src_encoded]
     src_encoded = [s if len(s)<=max_seq_len else s[:max_seq_len] for s in src_encoded]
 
