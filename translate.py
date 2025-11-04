@@ -13,7 +13,7 @@ from torch.serialization import default_restore_location
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-from seq2seq.decode import decode
+from seq2seq.decode import decode, decode_beam
 from seq2seq.data.tokenizer import BPETokenizer
 from seq2seq import models, utils
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
@@ -39,6 +39,8 @@ def get_args():
     parser.add_argument('--batch-size', default=1, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', required=True, type=str, help='path to the output file destination')
     parser.add_argument('--max-len', default=128, type=int, help='maximum length of generated sequence')
+    parser.add_argument('--beam-size', default=1, type=int, help='beam size > 1 enables beam search decoding')
+    parser.add_argument('--length-penalty', default=0.6, type=float, help='length penalty alpha for beam search')
     
     # BLEU computation arguments
     parser.add_argument('--bleu', action='store_true', help='If set, compute BLEU score after translation')
@@ -132,7 +134,7 @@ def main(args):
 
 
     #------------------------------------------
-    # Translation loop (batched)
+    # Translation loop
     for batch in tqdm(batch_iter(src_encoded, args.batch_size)):
         with torch.no_grad():
             # Pad the batch to the same length
@@ -150,16 +152,32 @@ def main(args):
             # Use make_batch to get masks (trg_in, trg_out are not used for inference)
             src_tokens, trg_in, trg_out, src_pad_mask, trg_pad_mask = make_batch(src_tokens, dummy_y)
 
-            #-----------------------------------------
-            # Decode without teacher forcing
-            prediction = decode(model=model,
-                                      src_tokens=src_tokens,
-                                      src_pad_mask=src_pad_mask,
-                                      max_out_len=args.max_len,
-                                      tgt_tokenizer=tgt_tokenizer,
-                                      args=args,
-                                      device=DEVICE)
-            #----------------------------------------
+            if args.beam_size and args.beam_size > 1:
+                # Beam search per sample (slower, but simple)
+                prediction = []
+                for i in range(src_tokens.size(0)):
+                    single_src = src_tokens[i:i+1]
+                    single_mask = src_pad_mask[i:i+1] if src_pad_mask is not None else None
+                    seq = decode_beam(
+                        model=model,
+                        src_tokens=single_src,
+                        src_pad_mask=single_mask,
+                        max_out_len=args.max_len,
+                        tgt_tokenizer=tgt_tokenizer,
+                        device=DEVICE,
+                        beam_size=args.beam_size,
+                        length_penalty=args.length_penalty,
+                    )
+                    prediction.append(seq)
+            else:
+                # Greedy (batched)
+                prediction = decode(model=model,
+                                          src_tokens=src_tokens,
+                                          src_pad_mask=src_pad_mask,
+                                          max_out_len=args.max_len,
+                                          tgt_tokenizer=tgt_tokenizer,
+                                          args=args,
+                                          device=DEVICE)
 
         # Remove BOS and decode each sentence
         for sent in prediction:

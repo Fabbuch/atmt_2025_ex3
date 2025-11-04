@@ -4,13 +4,15 @@ import sentencepiece as spm
 
 
 class BPETokenizer:
-    """Wrapper class for a Byte-Pair Encoding (BPE) tokenizer using SentencePiece.\\
+    """Wrapper around SentencePiece for training/loading subword tokenizers.\\
+    Supports BPE (default) and Unigram.\\
     **Only used for training** the tokenizer, inference uses the SentencePieceProcessor directly."""
     def __init__(self, language: str, vocab_size: int,
-                     eos='</s>', bos='<s>', pad='<pad>', unk='<unk>'):
+                     eos='</s>', bos='<s>', pad='<pad>', unk='<unk>', model_type: str = 'bpe'):
         self.LANG = language
         self.vocab_size = vocab_size
         self.tokenizer = None
+        self.model_type = model_type
 
         # Initialize special tokens
         self.eos = eos
@@ -37,11 +39,19 @@ class BPETokenizer:
         else:
             raise ValueError("Tokenizer is not yet trained or loaded.")
 
-    def train_tokenizer(self, training_data: str, model_dir: str):
-        """Trains the SentencePiece tokenizer on the parameters provided in the initialization of the class.\\
-            The model is saved to the specified directory."""
-        model_name = f'{self.LANG}-bpe-{self.vocab_size}'
-        spm.SentencePieceTrainer.train(f'--input={training_data} --model_prefix={model_name} --pad_id=3 --vocab_size={self.vocab_size} --model_type=bpe --unk_piece={self.unk} --bos_piece={self.bos} --eos_piece={self.eos} --pad_piece={self.pad}')
+    def train_tokenizer(self, training_data, model_dir: str):
+        """Train SentencePiece tokenizer. training_data can be a str path or list[str] for joint training."""
+        input_spec = ','.join(training_data) if isinstance(training_data, (list, tuple)) else str(training_data)
+        model_name = f'{self.LANG}-{self.model_type}-{self.vocab_size}'
+        spm.SentencePieceTrainer.train(
+            f'--input={input_spec} '
+            f'--model_prefix={model_name} '
+            f'--pad_id=3 '
+            f'--vocab_size={self.vocab_size} '
+            f'--model_type={self.model_type} '
+            f'--unk_piece={self.unk} --bos_piece={self.bos} '
+            f'--eos_piece={self.eos} --pad_piece={self.pad}'
+        )
         
         self.tokenizer = spm.SentencePieceProcessor()
         self.tokenizer.load(f'{model_name}.model')
@@ -76,7 +86,7 @@ class BPETokenizer:
         **NOTE**: this is only for inspection by the user, the Dictionary class uses the model files to load the actual vocabulary."""
         if self.tokenizer is None:
             raise ValueError("Tokenizer is not yet trained.")
-        vocab_file = os.path.join(os.path.normpath(model_dir), f'{self.LANG}-bpe-{self.vocab_size}.vocab')
+        vocab_file = os.path.join(os.path.normpath(model_dir), f'{self.LANG}-{self.model_type}-{self.vocab_size}.vocab')
         with open(vocab_file, 'w', encoding='utf-8') as f:
             for id in range(self.tokenizer.get_piece_size()):
                 piece = self.tokenizer.id_to_piece(id)

@@ -22,4 +22,6 @@ toy_example/toy_example_output.en
 /cz-en
 
 # unused
-seq2seq/embedding_saver.py
+seq2seq/embedding_saver.py.venv/
+.DS_Store
+**/.DS_Store
