@@ -5,3 +5,6 @@ __pycache__/
 .ipynb_checkpoints/
 .env
 *.log
+toy_example/checkpoints/
+toy_example/data/prepared/
+toy_example/tokenizers/
