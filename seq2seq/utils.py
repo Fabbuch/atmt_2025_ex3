@@ -142,3 +142,84 @@ def make_batch_input(device, pad: int = 3, max_seq_len: int = None):
         tgt_pad_mask = (tgt_in == pad).view(tgt_in.size(0), 1, 1, tgt_in.size(-1))
         return src, tgt_in, tgt_out, src_pad_mask, tgt_pad_mask
     return batch_fn
+
+
+def average_checkpoints(checkpoint_paths):
+    """Average parameters from multiple checkpoints.
+
+    Args:
+        checkpoint_paths: List of paths to checkpoint files
+
+    Returns:
+        A state dict with averaged model parameters
+    """
+    if not checkpoint_paths:
+        raise ValueError("No checkpoint paths provided")
+
+    logging.info(f"Averaging {len(checkpoint_paths)} checkpoints:")
+    for path in checkpoint_paths:
+        logging.info(f"  - {path}")
+
+    # Load first checkpoint as template
+    avg_state = torch.load(
+        checkpoint_paths[0],
+        map_location=lambda s, l: default_restore_location(s, 'cpu'),
+        weights_only=False
+    )
+
+    # Get model state dict
+    avg_params = avg_state['model']
+
+    # Average parameters from all checkpoints
+    for path in checkpoint_paths[1:]:
+        state = torch.load(
+            path,
+            map_location=lambda s, l: default_restore_location(s, 'cpu'),
+            weights_only=False
+        )
+        for key in avg_params.keys():
+            avg_params[key] += state['model'][key]
+
+    # Divide by number of checkpoints
+    for key in avg_params.keys():
+        avg_params[key] = avg_params[key] / len(checkpoint_paths)
+
+    # Update the averaged state
+    avg_state['model'] = avg_params
+    avg_state['epoch'] = avg_state.get('epoch', -1)  # Keep last epoch info
+
+    logging.info("Checkpoint averaging complete")
+    return avg_state
+
+
+def find_checkpoints(checkpoint_dir, pattern='checkpoint*.pt', last_n=None):
+    """Find checkpoint files in a directory.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoints
+        pattern: Glob pattern to match checkpoint files
+        last_n: If specified, return only the last N checkpoints (by modification time)
+
+    Returns:
+        List of checkpoint file paths
+    """
+    import glob
+
+    checkpoint_pattern = os.path.join(checkpoint_dir, pattern)
+    checkpoints = glob.glob(checkpoint_pattern)
+
+    # Filter out 'best' and 'last' checkpoints if we want epoch checkpoints
+    if last_n is not None:
+        # Only include numbered checkpoints
+        checkpoints = [c for c in checkpoints if 'checkpoint_best' not in c and 'checkpoint_last' not in c]
+
+    if not checkpoints:
+        return []
+
+    # Sort by modification time
+    checkpoints.sort(key=os.path.getmtime)
+
+    if last_n is not None:
+        checkpoints = checkpoints[-last_n:]
+
+    return checkpoints
